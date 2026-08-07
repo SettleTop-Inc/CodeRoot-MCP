@@ -1,0 +1,22 @@
+[project]
+name = "coderoot-mcp"
+version = "0.1.0"
+description = "Serve CodeRoot's repository intelligence — snapshots, metrics and prior assessments — over MCP."
+requires-python = ">=3.12"
+dependencies = ["mcp>=2.0", "httpx>=0.28", "pydantic>=2.9", "pydantic-settings>=2.6"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3", "anyio>=4"]
+
+[project.scripts]
+coderoot-mcp = "coderoot_mcp.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["coderoot_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
