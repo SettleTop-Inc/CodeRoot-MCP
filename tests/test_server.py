@@ -33,6 +33,12 @@ class _ClientCacheHit(_Client):
         return {"asset_types": ["agent"]}
 
 
+class _ClientMissingFile(_Client):
+    def get_files(self, repo_id, commit_sha, paths):
+        self.calls.append(("files", repo_id, commit_sha, tuple(paths)))
+        return {"files": {"a.py": "x"}, "missing": ["b.py"]}
+
+
 @pytest.mark.anyio
 async def test_all_six_tools_are_registered():
     names = {t.name for t in await build_server(_Client()).list_tools()}
@@ -67,6 +73,21 @@ async def test_read_files_passes_the_path_list_through():
         "read_files", {"repo_id": "r", "commit_sha": "abc", "paths": ["a.py"]})
     assert json.loads(r.content[0].text)["files"] == {"a.py": "x"}
     assert ("files", "r", "abc", ("a.py",)) in c.calls
+
+
+@pytest.mark.anyio
+async def test_read_files_carries_missing_through_untouched():
+    # The one field read_files exists to carry: a non-empty `missing` means
+    # "re-acquire this repository" downstream. A tool that filtered or
+    # flattened it would silently turn that into "we looked and found
+    # nothing" -- so this must be asserted on directly, not just implied by
+    # a fixture that happens to hard-code an empty list.
+    c = _ClientMissingFile()
+    r = await build_server(c).call_tool(
+        "read_files", {"repo_id": "r", "commit_sha": "abc", "paths": ["a.py", "b.py"]})
+    body = json.loads(r.content[0].text)
+    assert body["missing"] == ["b.py"]
+    assert body["files"] == {"a.py": "x"}
 
 
 @pytest.mark.anyio
