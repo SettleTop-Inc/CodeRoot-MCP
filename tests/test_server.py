@@ -1,5 +1,8 @@
 import json
+import httpx
 import pytest
+from mcp.client.client import Client
+
 from coderoot_mcp.server import build_server
 
 
@@ -37,6 +40,29 @@ class _ClientMissingFile(_Client):
     def get_files(self, repo_id, commit_sha, paths):
         self.calls.append(("files", repo_id, commit_sha, tuple(paths)))
         return {"files": {"a.py": "x"}, "missing": ["b.py"]}
+
+
+class _RaisingClient(_Client):
+    """A client double whose get_subject/get_files raise httpx.HTTPStatusError
+    the way the real CodeRootClient does when raise_for_status() fires (a 4xx
+    or 5xx response). No client double that could fail this way existed
+    before this test file -- the entire error path was unexercised."""
+
+    def __init__(self, status_code):
+        super().__init__()
+        self.status_code = status_code
+
+    def _raise(self):
+        request = httpx.Request("GET", "http://api.test/x")
+        response = httpx.Response(self.status_code, request=request)
+        raise httpx.HTTPStatusError(
+            f"{self.status_code} error", request=request, response=response)
+
+    def get_subject(self, repo_id, subdir):
+        self._raise()
+
+    def get_files(self, repo_id, commit_sha, paths):
+        self._raise()
 
 
 @pytest.mark.anyio
@@ -137,3 +163,79 @@ async def test_llm_cache_put_returns_a_confirmation_payload():
     assert r.content and len(r.content) > 0
     assert json.loads(r.content[0].text) == {"stored": True}
     assert ("put", "m", "h") in c.calls
+
+
+# --- Error handling: a routine 404 ("never acquired") must stay distinguishable
+# from an upstream failure ("CodeRoot is down"). Confusing them would let an
+# outage look like "nothing to assess".
+
+@pytest.mark.anyio
+async def test_get_subject_404_reports_not_acquired():
+    r = await build_server(_RaisingClient(404)).call_tool(
+        "get_subject", {"repo_id": "r", "subdir": ""})
+    assert r.content and len(r.content) > 0
+    assert json.loads(r.content[0].text) == {"error": "not_acquired"}
+
+
+@pytest.mark.anyio
+async def test_get_subject_5xx_reports_upstream_error_with_the_status_code():
+    r = await build_server(_RaisingClient(503)).call_tool(
+        "get_subject", {"repo_id": "r", "subdir": ""})
+    body = json.loads(r.content[0].text)
+    assert body["error"] == "upstream_error"
+    assert body["status_code"] == 503
+
+
+@pytest.mark.anyio
+async def test_get_metrics_404_reports_not_acquired():
+    r = await build_server(_RaisingClient(404)).call_tool("get_metrics", {"repo_id": "r"})
+    assert json.loads(r.content[0].text) == {"error": "not_acquired"}
+
+
+@pytest.mark.anyio
+async def test_get_metrics_5xx_reports_upstream_error():
+    r = await build_server(_RaisingClient(500)).call_tool("get_metrics", {"repo_id": "r"})
+    body = json.loads(r.content[0].text)
+    assert body["error"] == "upstream_error"
+    assert body["status_code"] == 500
+
+
+@pytest.mark.anyio
+async def test_read_files_404_reports_not_acquired():
+    r = await build_server(_RaisingClient(404)).call_tool(
+        "read_files", {"repo_id": "r", "commit_sha": "abc", "paths": ["a.py"]})
+    assert json.loads(r.content[0].text) == {"error": "not_acquired"}
+
+
+@pytest.mark.anyio
+async def test_read_files_5xx_reports_upstream_error():
+    r = await build_server(_RaisingClient(502)).call_tool(
+        "read_files", {"repo_id": "r", "commit_sha": "abc", "paths": ["a.py"]})
+    body = json.loads(r.content[0].text)
+    assert body["error"] == "upstream_error"
+    assert body["status_code"] == 502
+
+
+@pytest.mark.anyio
+async def test_a_real_mcp_client_sees_the_discriminator_not_an_opaque_error_string():
+    # build_server(...).call_tool() (used by every test above) calls
+    # MCPServer.call_tool() directly, which never touches
+    # MCPServer._handle_call_tool -- the callback actually wired to the
+    # lowlevel Server as on_call_tool, and so the one a real client's
+    # tools/call request is dispatched through. That handler is what rewrites
+    # any exception escaping a tool into an opaque
+    # `CallToolResult(content=[TextContent(text=str(e))], is_error=True)`
+    # (mcp/server/mcpserver/server.py:415-424) -- the exact collapse this
+    # fix exists to prevent. Driving through `mcp.client.client.Client`
+    # (mode="legacy") exercises that real dispatch path end to end: a
+    # JSON-RPC call over in-memory streams into `Server.run()`, the same
+    # method `MCPServer.run_stdio_async` uses in production. Without the
+    # fix in server.py, this test fails (see remediation report for the
+    # captured pre-fix transcript): is_error is True and the body is the
+    # string "Error executing tool get_subject: 404 error" instead of JSON.
+    server = build_server(_RaisingClient(404))
+    async with Client(server, mode="legacy") as client:
+        result = await client.call_tool("get_subject", {"repo_id": "r", "subdir": ""})
+    assert result.is_error is not True
+    assert result.content and len(result.content) > 0
+    assert json.loads(result.content[0].text) == {"error": "not_acquired"}
