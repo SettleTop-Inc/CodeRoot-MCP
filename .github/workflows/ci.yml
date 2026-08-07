@@ -1,0 +1,57 @@
+name: ci
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install uv
+      # --locked asserts uv.lock is in sync with pyproject.toml and fails the
+      # build if they have diverged, so a floor bump without a matching
+      # `uv lock` cannot go unnoticed. (--frozen would not catch this: it
+      # syncs from whatever the lock already says without checking it
+      # against pyproject at all — verified empirically in the sibling
+      # Assessor repo.)
+      - run: uv sync --locked --all-extras
+      - run: uv run pytest -v
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t coderoot-mcp:ci .
+      # Fail-closed must hold in the built image, not only in unit tests.
+      # Bounded and asserted on the message, not just the exit code: this
+      # service speaks MCP over stdio, so if fail-closed ever regressed and
+      # main() reached the stdio transport, a bare `docker run` (no stdin
+      # attached) would either block reading stdin or exit 0 on an
+      # immediate EOF — neither of which is the fail-closed message. This
+      # must distinguish three outcomes: refused for the right reason
+      # (pass), started/ran without configuration (fail fast), still
+      # running at the timeout (fail fast) — asserting on the exit code
+      # alone would let a container that exits non-zero for an unrelated
+      # reason read as success.
+      - name: assert the image refuses to start unconfigured
+        run: |
+          set +e
+          timeout 30s docker run --rm coderoot-mcp:ci > out.log 2>&1
+          code=$?
+          set -e
+          if [ "$code" -eq 124 ]; then
+            echo "FAIL: image was still running after 30s with no config set"
+            cat out.log; exit 1
+          fi
+          if [ "$code" -eq 0 ]; then
+            echo "FAIL: image exited successfully with no config set"
+            cat out.log; exit 1
+          fi
+          grep -q "refusing to start without CODEROOT_API_URL" out.log || {
+            echo "FAIL: exited non-zero but not for the fail-closed reason"; cat out.log; exit 1; }
+          echo "OK: refused to start, exit=$code"
