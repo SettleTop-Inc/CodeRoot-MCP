@@ -11,25 +11,34 @@ from mcp.server.mcpserver import MCPServer
 _METRIC_KEYS = ("license", "releases")
 
 
+def _upstream_error_payload(exc: httpx.HTTPStatusError) -> dict:
+    """The generic failure payload every tool returns instead of letting an
+    HTTPStatusError escape. Returned as a structured dict rather than
+    re-raised: the SDK's tool runner catches any exception escaping a tool
+    and rewrites it into an opaque `ToolError` string
+    (mcp/server/mcpserver/tools/base.py:181), which would destroy the very
+    discriminator this exists to preserve.
+
+    {"error": "upstream_error", "status_code": <int>, "detail": <str>} means
+    CodeRoot itself is down or erroring. The right response is to retry
+    later -- this is never a stand-in for "there is nothing here"."""
+    return {"error": "upstream_error", "status_code": exc.response.status_code,
+            "detail": str(exc)}
+
+
 def _http_error_payload(exc: httpx.HTTPStatusError) -> dict:
     """Turn a raised HTTPStatusError into the discriminated payload the
-    subject/file tools return instead of letting it escape. Returned as a
-    structured dict rather than re-raised: the SDK's tool runner catches any
-    exception escaping a tool and rewrites it into an opaque `ToolError`
-    string (mcp/server/mcpserver/tools/base.py:181), which would destroy the
-    very discriminator this exists to preserve.
+    subject/file tools return instead of letting it escape.
 
     {"error": "not_acquired"} is CodeRoot's plain 404 for this repo/subdir
     (subjects.py: "no acquisition for this repo") -- a routine, expected
     answer, not a failure. The right response is to acquire it.
 
-    {"error": "upstream_error", "status_code": <int>, "detail": <str>} is
-    anything else -- CodeRoot itself is down or erroring. The right response
-    is to retry later, never to read it as "this repository has no content"."""
-    status = exc.response.status_code
-    if status == 404:
+    Anything else falls through to _upstream_error_payload -- CodeRoot itself
+    is down or erroring, never "this repository has no content"."""
+    if exc.response.status_code == 404:
         return {"error": "not_acquired"}
-    return {"error": "upstream_error", "status_code": status, "detail": str(exc)}
+    return _upstream_error_payload(exc)
 
 
 def build_server(client) -> MCPServer:
@@ -93,8 +102,15 @@ def build_server(client) -> MCPServer:
         including its content fingerprint and previously derived asset types. When
         this repository has never been assessed, returns
         {"found": false, "assessment": null} — a real, non-error result, not an
-        absent payload."""
-        a = client.get_prior_assessment(repo_id, subdir)
+        absent payload.
+
+        On any OTHER HTTP failure (5xx, auth, etc. — the 404 above is already
+        handled and is not an error) returns {"error": "upstream_error",
+        "status_code": <int>, "detail": <str>} instead of raising."""
+        try:
+            a = client.get_prior_assessment(repo_id, subdir)
+        except httpx.HTTPStatusError as exc:
+            return _upstream_error_payload(exc)
         return {"found": a is not None, "assessment": a}
 
     @mcp.tool()
@@ -102,17 +118,31 @@ def build_server(client) -> MCPServer:
         """Look up a cached LLM response by model name and the SHA-256 hash of the
         prompt that produced it. On a cache miss — the common case against a cold
         cache — returns {"hit": false, "response": null} rather than an absent
-        payload, which is a normal outcome and not an error."""
-        r = client.cache_get(model, prompt_sha256)
+        payload, which is a normal outcome and not an error.
+
+        On any HTTP failure, including a 404 (which carries no "not cached"
+        meaning here — a miss is already a 200 with {"hit": false}, so a 404
+        is a genuine fault), returns {"error": "upstream_error",
+        "status_code": <int>, "detail": <str>} instead of raising."""
+        try:
+            r = client.cache_get(model, prompt_sha256)
+        except httpx.HTTPStatusError as exc:
+            return _upstream_error_payload(exc)
         return {"hit": r is not None, "response": r}
 
     @mcp.tool()
     def llm_cache_put(model: str, prompt_sha256: str, response: dict) -> dict:
         """Store an LLM response in the cache keyed by model name and the SHA-256
         hash of the prompt, so a later call with the same key can be served without
-        re-invoking the model. Returns {"stored": true} on success; a failed write
-        raises rather than returning an empty payload."""
-        client.cache_put(model, prompt_sha256, response)
+        re-invoking the model. Returns {"stored": true} on success.
+
+        On any HTTP failure, including a 404 (a genuine fault here, the same
+        as llm_cache_get), returns {"error": "upstream_error", "status_code":
+        <int>, "detail": <str>} instead of raising."""
+        try:
+            client.cache_put(model, prompt_sha256, response)
+        except httpx.HTTPStatusError as exc:
+            return _upstream_error_payload(exc)
         return {"stored": True}
 
     return mcp

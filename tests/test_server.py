@@ -43,10 +43,11 @@ class _ClientMissingFile(_Client):
 
 
 class _RaisingClient(_Client):
-    """A client double whose get_subject/get_files raise httpx.HTTPStatusError
-    the way the real CodeRootClient does when raise_for_status() fires (a 4xx
-    or 5xx response). No client double that could fail this way existed
-    before this test file -- the entire error path was unexercised."""
+    """A client double whose every CodeRootClient method raises
+    httpx.HTTPStatusError the way the real client does when
+    raise_for_status() fires (a 4xx or 5xx response). No client double that
+    could fail this way existed before this test file -- the entire error
+    path was unexercised."""
 
     def __init__(self, status_code):
         super().__init__()
@@ -62,6 +63,15 @@ class _RaisingClient(_Client):
         self._raise()
 
     def get_files(self, repo_id, commit_sha, paths):
+        self._raise()
+
+    def get_prior_assessment(self, repo_id, subdir):
+        self._raise()
+
+    def cache_get(self, model, h):
+        self._raise()
+
+    def cache_put(self, model, h, response):
         self._raise()
 
 
@@ -239,3 +249,85 @@ async def test_a_real_mcp_client_sees_the_discriminator_not_an_opaque_error_stri
     assert result.is_error is not True
     assert result.content and len(result.content) > 0
     assert json.loads(result.content[0].text) == {"error": "not_acquired"}
+
+
+# --- Same coverage extended to the three tools that still raised after the
+# first fix round: get_prior_assessment, llm_cache_get, llm_cache_put. A
+# consumer needing two parsing paths on the error branch (structured dict vs
+# raised ToolError, depending on which tool) is the same "one parsing path"
+# regression the previous fix round eliminated on the success branch.
+
+@pytest.mark.anyio
+async def test_get_prior_assessment_5xx_reports_upstream_error():
+    # The 404-means-not-yet-assessed behaviour is client.py's job (already
+    # covered by test_get_prior_assessment_absent_still_lands_in_content,
+    # via _ClientNoPriorAssessment returning None); this covers what the
+    # tool itself must do with anything that actually reaches it as a raised
+    # HTTPStatusError.
+    r = await build_server(_RaisingClient(503)).call_tool(
+        "get_prior_assessment", {"repo_id": "r", "subdir": ""})
+    body = json.loads(r.content[0].text)
+    assert body["error"] == "upstream_error"
+    assert body["status_code"] == 503
+
+
+@pytest.mark.anyio
+async def test_llm_cache_get_404_reports_upstream_error_not_a_miss():
+    # A 404 here carries no "not acquired" meaning the way it does for
+    # get_subject/get_metrics/read_files -- a cache miss is already a 200
+    # with {"hit": false} (see client.py's cache_get), so a 404 is a genuine
+    # fault and must not be quietly folded into a miss or mislabeled
+    # not_acquired.
+    r = await build_server(_RaisingClient(404)).call_tool(
+        "llm_cache_get", {"model": "m", "prompt_sha256": "h"})
+    body = json.loads(r.content[0].text)
+    assert body["error"] == "upstream_error"
+    assert body["status_code"] == 404
+
+
+@pytest.mark.anyio
+async def test_llm_cache_get_5xx_reports_upstream_error():
+    r = await build_server(_RaisingClient(500)).call_tool(
+        "llm_cache_get", {"model": "m", "prompt_sha256": "h"})
+    body = json.loads(r.content[0].text)
+    assert body["error"] == "upstream_error"
+    assert body["status_code"] == 500
+
+
+@pytest.mark.anyio
+async def test_llm_cache_put_404_reports_upstream_error():
+    r = await build_server(_RaisingClient(404)).call_tool(
+        "llm_cache_put", {"model": "m", "prompt_sha256": "h", "response": {"a": 1}})
+    body = json.loads(r.content[0].text)
+    assert body["error"] == "upstream_error"
+    assert body["status_code"] == 404
+
+
+@pytest.mark.anyio
+async def test_llm_cache_put_5xx_reports_upstream_error():
+    r = await build_server(_RaisingClient(502)).call_tool(
+        "llm_cache_put", {"model": "m", "prompt_sha256": "h", "response": {"a": 1}})
+    body = json.loads(r.content[0].text)
+    assert body["error"] == "upstream_error"
+    assert body["status_code"] == 502
+
+
+@pytest.mark.anyio
+async def test_a_real_mcp_client_sees_llm_cache_get_upstream_error_not_a_raised_toolerror():
+    # Same reasoning as test_a_real_mcp_client_sees_the_discriminator_not_an_
+    # opaque_error_string above, for the tool the coordinator's probe caught
+    # still raising: before this fix, a real client calling llm_cache_get
+    # during an outage saw is_error=True and the opaque string
+    # "Error executing tool llm_cache_get: 503 error", indistinguishable from
+    # any other failure. Driven through the real JSON-RPC dispatch path
+    # (mode="legacy"), not the build_server(...).call_tool() shortcut, since
+    # that is where the difference between "raised" and "returned" actually
+    # shows up to a real client.
+    server = build_server(_RaisingClient(503))
+    async with Client(server, mode="legacy") as client:
+        result = await client.call_tool("llm_cache_get", {"model": "m", "prompt_sha256": "h"})
+    assert result.is_error is not True
+    assert result.content and len(result.content) > 0
+    body = json.loads(result.content[0].text)
+    assert body["error"] == "upstream_error"
+    assert body["status_code"] == 503
