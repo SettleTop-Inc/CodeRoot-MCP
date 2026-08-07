@@ -14,20 +14,28 @@ logic — see `coderoot_mcp/client.py` for the full set of routes it calls.
 
 Two environment variables are required. The service refuses to start
 without both — see `coderoot_mcp/config.py` — so a misconfigured deployment
-fails immediately rather than serving with nothing behind it.
+fails immediately rather than serving with nothing behind it. This holds
+regardless of transport.
 
 | Variable | Required | Meaning |
 | --- | --- | --- |
 | `CODEROOT_API_URL` | yes | Base URL of the CodeRoot API this server reads through — no trailing slash, no `/v1` prefix. |
 | `CODEROOT_API_TOKEN` | yes | Bearer token sent as `Authorization: Bearer <token>` on every request to CodeRoot. |
 | `REQUEST_TIMEOUT_S` | no (default `30`) | Per-request timeout, in seconds, for calls to CodeRoot. |
+| `MCP_TRANSPORT` | no (default `stdio`) | `stdio` or `streamable-http` — which MCP transport this process serves. See "Running" below. |
+| `MCP_HTTP_HOST` | no (default `127.0.0.1`) | Bind address, used only when `MCP_TRANSPORT=streamable-http`. The container image overrides this to `0.0.0.0` — binding all interfaces inside a container is correct; the published port is the operator's choice. |
+| `MCP_HTTP_PORT` | no (default `8000`) | Bind port, used only when `MCP_TRANSPORT=streamable-http`. |
 
 ## Running
 
-This service speaks **MCP over stdio**, not HTTP — there is no port to
-publish and no health endpoint (the image declares neither). An MCP client
-launches it as a subprocess and exchanges JSON-RPC over that process's own
-stdin/stdout, so the container must be run with stdin attached:
+This service supports two MCP transports, selected by `MCP_TRANSPORT`. The
+default is unchanged from before this option existed.
+
+### stdio (default) — a local client spawns this as a subprocess
+
+An MCP client (an IDE plugin, a desktop app) launches this image as a
+subprocess and exchanges JSON-RPC over that process's own stdin/stdout. No
+port is used in this mode — the container must be run with stdin attached:
 
 ```bash
 docker build -t coderoot-mcp:dev .
@@ -43,9 +51,34 @@ way a real MCP client subprocess would drive it — it will not print anything
 on its own and will keep running until the client (or you) closes the
 connection.
 
+### streamable-http — another service dials this over the network
+
+Set `MCP_TRANSPORT=streamable-http` and publish the port instead. This is
+what makes the container a deployable asset in its own right rather than a
+subprocess one client at a time can spawn — any number of services can dial
+it concurrently at `http://<host>:<port>/mcp`:
+
+```bash
+docker build -t coderoot-mcp:dev .
+
+docker run --rm -p 8000:8000 \
+  -e CODEROOT_API_URL=http://host.docker.internal:8080 \
+  -e CODEROOT_API_TOKEN=changeme \
+  -e MCP_TRANSPORT=streamable-http \
+  coderoot-mcp:dev
+```
+
+No `-i` is needed here — the container doesn't read stdin in this mode. The
+image already sets `MCP_HTTP_HOST=0.0.0.0` so the published port reaches the
+process inside the container; override `MCP_HTTP_PORT` (and the `-p` mapping
+to match) to use a different port.
+
+### Both modes
+
 Omit either required environment variable and the process exits immediately,
-non-zero, instead of hanging on a stdin read: configuration is validated in
-`main()` before the stdio transport is ever touched.
+non-zero, instead of hanging on a stdin read or starting an HTTP listener:
+configuration is validated in `main()` before either transport is ever
+touched.
 
 ## Tools
 
