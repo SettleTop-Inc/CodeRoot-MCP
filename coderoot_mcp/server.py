@@ -37,24 +37,31 @@ def build_server(client) -> MCPServer:
         return client.get_files(repo_id, commit_sha, paths)
 
     @mcp.tool()
-    def get_prior_assessment(repo_id: str, subdir: str = "") -> dict | None:
+    def get_prior_assessment(repo_id: str, subdir: str = "") -> dict:
         """Return the most recent stored assessment for this repository and subdir,
-        including its content fingerprint and previously derived asset types.
-        Returns null when this repository has never been assessed."""
-        return client.get_prior_assessment(repo_id, subdir)
+        including its content fingerprint and previously derived asset types. When
+        this repository has never been assessed, returns
+        {"found": false, "assessment": null} — a real, non-error result, not an
+        absent payload."""
+        a = client.get_prior_assessment(repo_id, subdir)
+        return {"found": a is not None, "assessment": a}
 
     @mcp.tool()
-    def llm_cache_get(model: str, prompt_sha256: str) -> dict | None:
+    def llm_cache_get(model: str, prompt_sha256: str) -> dict:
         """Look up a cached LLM response by model name and the SHA-256 hash of the
-        prompt that produced it. Returns null on a cache miss, which is a normal
-        outcome and not an error."""
-        return client.cache_get(model, prompt_sha256)
+        prompt that produced it. On a cache miss — the common case against a cold
+        cache — returns {"hit": false, "response": null} rather than an absent
+        payload, which is a normal outcome and not an error."""
+        r = client.cache_get(model, prompt_sha256)
+        return {"hit": r is not None, "response": r}
 
     @mcp.tool()
-    def llm_cache_put(model: str, prompt_sha256: str, response: dict) -> None:
+    def llm_cache_put(model: str, prompt_sha256: str, response: dict) -> dict:
         """Store an LLM response in the cache keyed by model name and the SHA-256
         hash of the prompt, so a later call with the same key can be served without
-        re-invoking the model."""
+        re-invoking the model. Returns {"stored": true} on success; a failed write
+        raises rather than returning an empty payload."""
         client.cache_put(model, prompt_sha256, response)
+        return {"stored": True}
 
     return mcp
