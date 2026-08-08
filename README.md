@@ -151,3 +151,7 @@ uv run pytest
 The image installs from `uv.lock` (`uv export --locked | uv pip install
 --system -r -`), not from `pyproject.toml` directly, so the dependency graph
 CI validates and the graph that ships in the image are the same graph.
+
+## License
+
+GPL-3.0-or-later. See [LICENSE](LICENSE).

@@ -2,6 +2,7 @@
 name = "coderoot-mcp"
 version = "0.1.0"
 description = "Serve CodeRoot's repository intelligence — snapshots, metrics and prior assessments — over MCP."
+license = "GPL-3.0-or-later"
 requires-python = ">=3.12"
 dependencies = ["mcp>=2.0", "httpx>=0.28", "pydantic>=2.9", "pydantic-settings>=2.6",
                 "starlette>=1.0", "uvicorn>=0.30"]
