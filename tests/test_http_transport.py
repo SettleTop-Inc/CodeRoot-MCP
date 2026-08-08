@@ -40,9 +40,11 @@ import sys
 import threading
 import time
 
+import httpx
 import uvicorn
 from mcp.client.client import Client
 from mcp.client.streamable_http import streamable_http_client
+from mcp.shared._httpx_utils import create_mcp_http_client
 
 from coderoot_mcp.server import build_server
 
@@ -101,7 +103,7 @@ def _serve(mcp_server):
         thread.join(timeout=5)
 
 
-async def _call_tool(url: str, tool: str, args: dict):
+async def _call_tool(url: str, tool: str, args: dict, *, token: str | None = None):
     # `streamable_http_client(url)` returns an (unentered) async context
     # manager; `Client.__aenter__` enters it itself
     # (`exit_stack.enter_async_context(transport)` in mcp/client/client.py) --
@@ -110,6 +112,17 @@ async def _call_tool(url: str, tool: str, args: dict):
     # construction as the sibling Assessor repo's `assessor/mcp_client.py`
     # (`transport = streamable_http_client(...); async with Client(transport,
     # ...)`, never `async with streamable_http_client(...) as transport`).
+    #
+    # `token`, when given, is attached as `Authorization: Bearer <token>` the
+    # same way `assessor/mcp_client.py` attaches its own -- a bare URL string
+    # handed to `Client()` builds a header-less transport internally
+    # (verified against that file's own comment on the same construction).
+    if token is not None:
+        headers = {"Authorization": f"Bearer {token}"}
+        async with create_mcp_http_client(headers=headers) as http_client:
+            transport = streamable_http_client(url, http_client=http_client)
+            async with Client(transport, mode="auto") as client:
+                return await client.call_tool(tool, args)
     transport = streamable_http_client(url)
     async with Client(transport, mode="auto") as client:
         return await client.call_tool(tool, args)
@@ -202,7 +215,14 @@ def test_the_real_console_entrypoint_serves_a_real_tool_call_over_streamable_htt
     """Spawns the ACTUAL `coderoot-mcp` entrypoint -- env-var config parsing,
     `main()`'s transport dispatch, and the SDK's streamable-http transport,
     exactly as a deployed operator would run it -- against a real (stub)
-    CodeRoot API, and drives one real tool call through the whole stack."""
+    CodeRoot API, and drives one real tool call through the whole stack.
+
+    Also, as of the inbound-auth change, this is the real proof that a
+    caller presenting the CONFIGURED CODEROOT_MCP_TOKEN as its bearer still
+    gets through the guard `_run_streamable_http` now wraps around the real
+    app -- not just that `BearerAuthMiddleware` accepts a matching token in
+    isolation (tests/test_auth.py), but that main()'s actual wiring passes
+    the actual configured token to it correctly end to end."""
     port = _free_port()
     with _stub_coderoot_api() as api_url:
         env = dict(os.environ)
@@ -212,6 +232,7 @@ def test_the_real_console_entrypoint_serves_a_real_tool_call_over_streamable_htt
             "MCP_TRANSPORT": "streamable-http",
             "MCP_HTTP_HOST": "127.0.0.1",
             "MCP_HTTP_PORT": str(port),
+            "CODEROOT_MCP_TOKEN": "inbound-secret",
         })
         proc = subprocess.Popen(
             [sys.executable, "-m", "coderoot_mcp"],
@@ -225,10 +246,60 @@ def test_the_real_console_entrypoint_serves_a_real_tool_call_over_streamable_htt
                 assert started, f"server did not start listening within 15s; output:\n{out}"
 
             result = asyncio.run(_call_tool(
-                f"http://127.0.0.1:{port}/mcp", "get_subject", {"repo_id": "r", "subdir": ""}))
+                f"http://127.0.0.1:{port}/mcp", "get_subject", {"repo_id": "r", "subdir": ""},
+                token="inbound-secret"))
             assert result.is_error is not True
             body = json.loads(result.content[0].text)
             assert body["commit_sha"] == "abc123"
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:  # pragma: no cover - platform-dependent
+                proc.kill()
+                proc.wait(timeout=5)
+
+
+def test_the_real_console_entrypoint_rejects_a_caller_with_no_bearer_at_all():
+    """The exact scenario the adversarial reviewer's finding described: a
+    caller reaching this service's real, deployed HTTP surface with zero
+    auth headers. Before the inbound-auth change, `initialize` succeeded, a
+    session was issued, and every tool was callable -- this proves that path
+    is now closed on the actual entrypoint an operator runs, not just on
+    `BearerAuthMiddleware` in isolation.
+
+    A raw `httpx.post` (no MCP handshake at all) is enough: the guard runs
+    before the app ever sees the request, so it rejects on the header alone,
+    regardless of body content -- confirmed by inspection
+    (coderoot_mcp/auth.py checks the header before calling `self._app`)."""
+    port = _free_port()
+    with _stub_coderoot_api() as api_url:
+        env = dict(os.environ)
+        env.update({
+            "CODEROOT_API_URL": api_url,
+            "CODEROOT_API_TOKEN": "test-token",
+            "MCP_TRANSPORT": "streamable-http",
+            "MCP_HTTP_HOST": "127.0.0.1",
+            "MCP_HTTP_PORT": str(port),
+            "CODEROOT_MCP_TOKEN": "inbound-secret",
+        })
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "coderoot_mcp"],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        try:
+            started = _wait_for_port("127.0.0.1", port, timeout=15)
+            if not started:
+                proc.terminate()
+                out = proc.stdout.read() if proc.stdout else ""
+                assert started, f"server did not start listening within 15s; output:\n{out}"
+
+            no_auth = httpx.post(f"http://127.0.0.1:{port}/mcp", json={"anything": 1})
+            assert no_auth.status_code == 401
+
+            wrong_auth = httpx.post(f"http://127.0.0.1:{port}/mcp", json={"anything": 1},
+                                    headers={"Authorization": "Bearer wrong-token"})
+            assert wrong_auth.status_code == 401
         finally:
             proc.terminate()
             try:

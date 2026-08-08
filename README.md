@@ -12,10 +12,10 @@ logic — see `coderoot_mcp/client.py` for the full set of routes it calls.
 
 ## Configuration
 
-Two environment variables are required. The service refuses to start
-without both — see `coderoot_mcp/config.py` — so a misconfigured deployment
-fails immediately rather than serving with nothing behind it. This holds
-regardless of transport.
+Two environment variables are required unconditionally. The service refuses
+to start without both — see `coderoot_mcp/config.py` — so a misconfigured
+deployment fails immediately rather than serving with nothing behind it.
+This holds regardless of transport.
 
 | Variable | Required | Meaning |
 | --- | --- | --- |
@@ -25,6 +25,40 @@ regardless of transport.
 | `MCP_TRANSPORT` | no (default `stdio`) | `stdio` or `streamable-http` — which MCP transport this process serves. See "Running" below. |
 | `MCP_HTTP_HOST` | no (default `127.0.0.1`) | Bind address, used only when `MCP_TRANSPORT=streamable-http`. The container image overrides this to `0.0.0.0` — binding all interfaces inside a container is correct; the published port is the operator's choice. |
 | `MCP_HTTP_PORT` | no (default `8000`) | Bind port, used only when `MCP_TRANSPORT=streamable-http`. |
+| `CODEROOT_MCP_TOKEN` | yes, when `MCP_TRANSPORT=streamable-http` | Bearer token every streamable-http caller must send as `Authorization: Bearer <token>`. See "Inbound auth" below. |
+| `CODEROOT_MCP_ALLOW_ANONYMOUS` | no (default `false`) | Explicit opt-out of inbound auth on streamable-http. See "Inbound auth" below. |
+
+### Inbound auth (streamable-http only)
+
+`stdio` has no listening socket — a local client spawns this process and
+exchanges JSON-RPC over that process's own stdin/stdout, a trust boundary
+already enforced by whoever can spawn the process. `streamable-http` opens a
+real network listener, and every one of the six tools is a read (or, for
+`llm_cache_put`, a write) against data CodeRoot holds behind its own bearer
+auth — without a check here, anyone who can reach the port reaches that data
+through this service's own `CODEROOT_API_TOKEN`, regardless of whether they
+hold one themselves.
+
+So, when `MCP_TRANSPORT=streamable-http`, the service refuses to start
+unless one of the following is set (mirrors the sibling Assessor's
+`ASSESSOR_API_TOKEN`/`ASSESSOR_ALLOW_ANONYMOUS`, `assessor/config.py`):
+
+- `CODEROOT_MCP_TOKEN` — every request must carry
+  `Authorization: Bearer <CODEROOT_MCP_TOKEN>` or it is rejected with 401.
+  This is the same value the sibling Assessor already sends as its own
+  `CODEROOT_MCP_TOKEN` (`assessor/config.py`'s `coderoot_mcp_token`,
+  consumed by `assessor/mcp_client.py`) — one shared secret, set on both
+  services.
+- `CODEROOT_MCP_ALLOW_ANONYMOUS=true` — an explicit, deliberate opt-out that
+  serves every request unauthenticated. Only appropriate where the network
+  path to this port is already controlled some other way (e.g. loopback-only
+  publish with nothing else on the host).
+
+The check lives in `coderoot_mcp/auth.py`, applied by
+`coderoot_mcp/__main__.py` as ASGI middleware wrapping the Starlette app
+`MCPServer.streamable_http_app()` returns — not the `mcp` SDK's own OAuth
+resource-server machinery (`TokenVerifier`/`AuthSettings`), which solves a
+different, heavier problem than "compare a static bearer token."
 
 ## Running
 
@@ -65,20 +99,26 @@ docker run --rm -p 8000:8000 \
   -e CODEROOT_API_URL=http://host.docker.internal:8080 \
   -e CODEROOT_API_TOKEN=changeme \
   -e MCP_TRANSPORT=streamable-http \
+  -e CODEROOT_MCP_TOKEN=changeme-too \
   coderoot-mcp:dev
 ```
 
 No `-i` is needed here — the container doesn't read stdin in this mode. The
 image already sets `MCP_HTTP_HOST=0.0.0.0` so the published port reaches the
 process inside the container; override `MCP_HTTP_PORT` (and the `-p` mapping
-to match) to use a different port.
+to match) to use a different port. `CODEROOT_MCP_TOKEN` is required in this
+mode (or `CODEROOT_MCP_ALLOW_ANONYMOUS=true` as an explicit opt-out) — see
+"Inbound auth" above.
 
 ### Both modes
 
-Omit either required environment variable and the process exits immediately,
+Omit a required environment variable and the process exits immediately,
 non-zero, instead of hanging on a stdin read or starting an HTTP listener:
 configuration is validated in `main()` before either transport is ever
-touched.
+touched. `CODEROOT_API_URL`/`CODEROOT_API_TOKEN` are required in both modes;
+`CODEROOT_MCP_TOKEN` (or the explicit `CODEROOT_MCP_ALLOW_ANONYMOUS` opt-out)
+is required only in `streamable-http` mode, since `stdio` opens no listener
+for it to guard.
 
 ## Tools
 

@@ -19,7 +19,28 @@ defaults to loopback, the same convention as the sibling Assessor's
 it to 0.0.0.0 via a Dockerfile `ENV`, matching that service's own pattern
 (binding all interfaces is correct inside a container; the published port is
 the operator's choice).
-"""
+
+`coderoot_mcp_token`/`coderoot_mcp_allow_anonymous` guard the "streamable-http"
+transport's network listener the same way `assessor_api_token`/
+`assessor_allow_anonymous` guard the sibling Assessor's -- a required inbound
+bearer token, with an explicit boolean that must be set to run without one.
+Named `CODEROOT_MCP_TOKEN` (not, say, `MCP_API_TOKEN`) to match this
+codebase's own naming convention already visible in the sibling repos: a
+shared secret is named after the SERVICE the token grants access to, the same
+name on the sending side (the Assessor's `assessor/config.py` already reads
+`CODEROOT_MCP_TOKEN` as the token it sends here) and the receiving side (here).
+`coderoot_api_token` above is the same pattern in the other direction -- the
+token this service sends TO CodeRoot.
+
+Deliberately scoped to "streamable-http": stdio has no listening socket at
+all -- a local client spawns this process and exchanges JSON-RPC over that
+process's own stdin/stdout, a trust boundary already enforced by whoever can
+spawn the process, not by anything a bearer header could add. Requiring
+CODEROOT_MCP_TOKEN unconditionally would force every local stdio deployment
+(an IDE plugin, Claude Desktop) to set a credential that protects nothing
+there, and would break every existing stdio caller (including this repo's own
+test suite) for no security benefit. See coderoot_mcp/auth.py for where the
+token is actually checked."""
 from __future__ import annotations
 
 from typing import Literal
@@ -44,6 +65,10 @@ class Settings(BaseSettings):
     mcp_http_host: str = "127.0.0.1"
     mcp_http_port: int = 8000
 
+    # --- inbound auth (streamable-http transport only; see module docstring) ---
+    coderoot_mcp_token: str | None = None
+    coderoot_mcp_allow_anonymous: bool = False
+
     @model_validator(mode="after")
     def _fails_closed(self) -> "Settings":
         if not self.coderoot_api_url:
@@ -54,4 +79,13 @@ class Settings(BaseSettings):
             raise ConfigError(
                 "refusing to start without CODEROOT_API_TOKEN: every CodeRoot "
                 "route sits behind bearer auth")
+        # Only the "streamable-http" transport opens a network listener -- see
+        # the module docstring for why stdio is exempt.
+        if (self.mcp_transport == "streamable-http"
+                and not self.coderoot_mcp_token
+                and not self.coderoot_mcp_allow_anonymous):
+            raise ConfigError(
+                "refusing to serve streamable-http unauthenticated: set "
+                "CODEROOT_MCP_TOKEN, or set CODEROOT_MCP_ALLOW_ANONYMOUS=true "
+                "to opt out deliberately")
         return self
