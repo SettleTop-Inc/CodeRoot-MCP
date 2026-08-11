@@ -60,10 +60,88 @@ The check lives in `coderoot_mcp/auth.py`, applied by
 resource-server machinery (`TokenVerifier`/`AuthSettings`), which solves a
 different, heavier problem than "compare a static bearer token."
 
+## Run with Docker (GHCR)
+
+The image is published to the GitHub Container Registry as
+`ghcr.io/settletop-inc/coderoot-mcp`. Tags: `:latest` and `:sha-<short>` for
+every push to `main`, and `:vX.Y.Z` for a release tag. (To build it yourself
+from this repo instead, see [Running](#running) below.)
+
+**This package is private (org-only), so pulling it requires authenticating to
+GHCR first — a one-time step per machine.** Log in with a GitHub Personal
+Access Token (classic) that has the `read:packages` scope, supplying the token
+as the password:
+
+```bash
+docker login ghcr.io -u <github-username>
+# Password: a classic PAT with the read:packages scope
+```
+
+Or, with the GitHub CLI:
+
+```bash
+gh auth refresh -s read:packages
+docker login ghcr.io -u <github-username> -p "$(gh auth token)"
+```
+
+Without this, `docker pull` / `docker run` of the image returns
+`403 Forbidden`.
+
+Then run it. This server speaks MCP over **stdio** by default — the container
+reads JSON-RPC on its stdin and writes replies on its stdout — so it must be
+run with stdin attached (`-i`). It performs no filesystem or GitHub access of
+its own (every tool call is one HTTP request to the CodeRoot API — see
+`coderoot_mcp/client.py`), so **no volume mount is needed**; it needs only the
+two required environment variables (see [Configuration](#configuration)):
+
+```bash
+docker run -i --rm \
+  -e CODEROOT_API_URL=http://host.docker.internal:8080 \
+  -e CODEROOT_API_TOKEN=<token> \
+  ghcr.io/settletop-inc/coderoot-mcp
+```
+
+From inside a container, `http://host.docker.internal:8080` reaches a CodeRoot
+API running on the host. Run by hand like this the process just waits on stdin
+with no output — that is correct; a real MCP client (below) is what drives it.
+Omit a required variable and it exits immediately with
+`refusing to start without CODEROOT_API_URL` (or `...CODEROOT_API_TOKEN`). To
+serve over the network instead of stdio, see the `streamable-http` mode under
+[Running](#running).
+
+## Use with Claude Code
+
+Register the published image with Claude Code so it launches the container as
+a stdio subprocess. The `-i` is **required** — it is what keeps stdin attached
+for the MCP handshake:
+
+```
+claude mcp add coderoot -- docker run --rm -i -e CODEROOT_API_URL=http://host.docker.internal:8080 -e CODEROOT_API_TOKEN=<token> ghcr.io/settletop-inc/coderoot-mcp
+```
+
+**Local (no Docker), with uv.** After `uv sync --locked --all-extras` in a
+clone of this repo, register the `coderoot-mcp` console script (declared in
+`pyproject.toml`) directly. Pass the env with Claude Code's own `-e` flags, and
+`--directory` so `uv run` launches from the repo no matter where you invoke it:
+
+```
+claude mcp add coderoot -e CODEROOT_API_URL=http://localhost:8080 -e CODEROOT_API_TOKEN=<token> -- uv run --directory /path/to/CodeRoot-MCP coderoot-mcp
+```
+
+(Locally the CodeRoot API is reached at `http://localhost:8080` — not
+`host.docker.internal`, which only applies from inside a container.)
+
+**Confirm it's connected.** `claude mcp list` should show `coderoot` as
+connected, and inside Claude Code the six [Tools](#tools) below —
+`get_subject`, `get_metrics`, `read_files`, `get_prior_assessment`,
+`llm_cache_get`, `llm_cache_put` — become available.
+
 ## Running
 
-This service supports two MCP transports, selected by `MCP_TRANSPORT`. The
-default is unchanged from before this option existed.
+This section covers building the image from source and the two MCP transports,
+selected by `MCP_TRANSPORT`. The default is unchanged from before this option
+existed. (To use the already-published image instead, see
+[Run with Docker (GHCR)](#run-with-docker-ghcr) above.)
 
 ### stdio (default) — a local client spawns this as a subprocess
 
