@@ -131,10 +131,19 @@ claude mcp add coderoot -e CODEROOT_API_URL=http://localhost:8080 -e CODEROOT_AP
 (Locally the CodeRoot API is reached at `http://localhost:8080` — not
 `host.docker.internal`, which only applies from inside a container.)
 
-**Confirm it's connected.** `claude mcp list` should show `coderoot` as
-connected, and inside Claude Code the six [Tools](#tools) below —
-`get_subject`, `get_metrics`, `read_files`, `get_prior_assessment`,
-`llm_cache_get`, `llm_cache_put` — become available.
+**Make it global, and reload.** `claude mcp add` defaults to **local** scope —
+the server is available only in the directory you ran it in, so it won't appear
+in a session for a different project. Add `--scope user` to register it for
+every project. MCP servers connect when a session starts, so **restart Claude
+Code (or open a new chat)** after adding — a mid-session add won't show until
+then.
+
+**Confirm it's connected.** Run the **`/mcp`** command inside Claude Code (there
+is no MCP menu or button — `/mcp` lists each server, its connection status, and
+its tools), or `claude mcp list` in a terminal. `coderoot` should show as
+connected, and the six [Tools](#tools) below — `get_subject`, `get_metrics`,
+`read_files`, `get_prior_assessment`, `llm_cache_get`, `llm_cache_put` —
+become available for the agent to call.
 
 ## Running
 
