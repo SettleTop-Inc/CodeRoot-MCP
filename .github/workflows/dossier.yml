@@ -1,0 +1,17 @@
+name: SettleTop AI Dossier
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch: {}
+jobs:
+  dossier:
+    uses: SettleTop-Inc/settletop-dossier-workflow/.github/workflows/private-door.yml@v1
+    permissions:
+      id-token: write         # licence + share
+      contents: write         # keep: release
+      packages: read          # pull + attest the engine image from GHCR (#298)
+      checks: write           # keep: checks
+      security-events: write  # keep: security-tab
+      actions: write          # cleanup
+    with:
+      share: registry
